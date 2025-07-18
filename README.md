@@ -5,7 +5,7 @@ A React-based F1 racing game with advanced ideal line features, AI driving, and 
 ## 🚀 Features
 
 ### Core Racing
-- **Realistic Physics**: Car movement with acceleration, braking, and steering
+- **Realistic Physics**: Car movement with acceleration, braking, reverse, and steering
 - **Oval Track**: NASCAR-style oval circuit with proper racing lines
 - **Lap Timing**: Real-time lap time measurement and best lap tracking
 - **Camera Follow**: Smooth camera following the car
@@ -35,7 +35,7 @@ A React-based F1 racing game with advanced ideal line features, AI driving, and 
 | Action | Keys |
 |--------|------|
 | Accelerate | W / ↑ |
-| Brake | S / ↓ |
+| Brake/Reverse | S / ↓ |
 | Turn Left | A / ← |
 | Turn Right | D / → |
 | Start Race | Space |
@@ -134,7 +134,7 @@ This project is open source and available under the MIT License.
 ## 🚀 주요 기능
 
 ### 핵심 레이싱
-- **현실적인 물리**: 가속, 제동, 조향이 포함된 차량 움직임
+- **현실적인 물리**: 가속, 제동, 후진, 조향이 포함된 차량 움직임
 - **타원형 트랙**: 적절한 레이싱 라인이 있는 NASCAR 스타일 타원 서킷
 - **랩타임 측정**: 실시간 랩타임 측정 및 베스트 랩 추적
 - **카메라 팔로우**: 차량을 부드럽게 따라가는 카메라
@@ -164,7 +164,7 @@ This project is open source and available under the MIT License.
 | 동작 | 키 |
 |------|-----|
 | 가속 | W / ↑ |
-| 제동 | S / ↓ |
+| 제동/후진 | S / ↓ |
 | 좌회전 | A / ← |
 | 우회전 | D / → |
 | 레이스 시작 | 스페이스 |

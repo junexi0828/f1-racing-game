@@ -221,15 +221,43 @@ function useCarPhysics({
                         } else {
                             newSpeed = Math.max(newSpeed - 0.3, 5); // 편차가 크면 감속
                         }
+
+                        // AI 후진 처리 (필요시)
+                        if (newSpeed < 0) {
+                            newSpeed = Math.max(newSpeed, -6); // AI 후진 최고속도 제한
+                        }
                     }
                 } else {
                     // 수동 조향
                     if (window._carKeys?.left) newAngle -= 10;
                     if (window._carKeys?.right) newAngle += 10;
-                    // 가속/감속
-                    if (window._carKeys?.up) newSpeed = Math.min(newSpeed + 1.2, 15);
-                    if (window._carKeys?.down) newSpeed = Math.max(newSpeed - 2.0, 0);
-                    if (!window._carKeys?.up && !window._carKeys?.down) newSpeed = Math.max(newSpeed - 0.1, 0);
+                    // 가속/감속/후진 (아케이드 모드)
+                    if (window._carKeys?.up) {
+                        // 전진 가속
+                        if (newSpeed >= 0) {
+                            newSpeed = Math.min(newSpeed + 1.2, 15);
+                        } else {
+                            // 후진 중일 때 전진으로 전환
+                            newSpeed = Math.min(newSpeed + 2.0, 0);
+                        }
+                    }
+                    if (window._carKeys?.down) {
+                        if (newSpeed > 0) {
+                            // 전진 중일 때 감속
+                            newSpeed = Math.max(newSpeed - 2.0, 0);
+                        } else {
+                            // 정지 상태에서 후진 시작
+                            newSpeed = Math.max(newSpeed - 1.5, -8); // 후진 최고속도 -8
+                        }
+                    }
+                    if (!window._carKeys?.up && !window._carKeys?.down) {
+                        // 자연 감속 (전진/후진 모두)
+                        if (newSpeed > 0) {
+                            newSpeed = Math.max(newSpeed - 0.1, 0);
+                        } else if (newSpeed < 0) {
+                            newSpeed = Math.min(newSpeed + 0.1, 0);
+                        }
+                    }
                 }
 
                 const angleRad = (newAngle * Math.PI) / 180;
@@ -541,7 +569,9 @@ const F1RacingGame = () => {
                 </div>
                 <div className="bg-gray-800 p-2 rounded">
                     <div className="text-gray-300">Speed</div>
-                    <div className="text-lg font-mono">{speed.toFixed(1)}</div>
+                    <div className={`text-lg font-mono ${speed < 0 ? 'text-red-400' : speed > 0 ? 'text-green-400' : 'text-white'}`}>
+                        {speed >= 0 ? speed.toFixed(1) : `R ${Math.abs(speed).toFixed(1)}`}
+                    </div>
                 </div>
                 <div className="bg-gray-800 p-2 rounded">
                     <div className="text-gray-300">Path Deviation</div>
@@ -757,7 +787,7 @@ const F1RacingGame = () => {
                     <div>
                         <div className="font-bold mb-1">🏎️ Controls:</div>
                         <div>W/↑: Accelerate</div>
-                        <div>S/↓: Brake</div>
+                        <div>S/↓: Brake/Reverse</div>
                         <div>A/←: Turn Left</div>
                         <div>D/→: Turn Right</div>
                     </div>
