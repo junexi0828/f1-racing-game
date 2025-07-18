@@ -86,6 +86,75 @@ const findNextTargetPoint = (currentPos, idealLine, lookAhead = 5) => {
     return idealLine[nextIndex];
 };
 
+// === 충돌 물리 시스템 ===
+// 벽과의 충돌 감지 및 반사 계산
+const calculateWallCollision = (currentPos, newPos, carAngle, speed, trackLayout) => {
+    const gridX = Math.floor(newPos.x);
+    const gridY = Math.floor(newPos.y);
+
+    // 트랙 밖으로 나간 경우
+    if (gridX < 0 || gridX >= GRID_WIDTH || gridY < 0 || gridY >= GRID_HEIGHT) {
+        return {
+            collision: true,
+            position: currentPos, // 원래 위치 유지
+            angle: carAngle + 180, // 반대 방향으로 튕김
+            speed: Math.max(speed * 0.3, 0), // 속도 70% 감소
+            type: 'boundary'
+        };
+    }
+
+    // 오프로드(벽)에 부딪힌 경우
+    if (!isRoadCell(trackLayout[gridY][gridX])) {
+        // 충돌 지점에서 가장 가까운 도로 찾기
+        const nearestRoad = findNearestRoadPoint(newPos, trackLayout);
+
+        return {
+            collision: true,
+            position: nearestRoad || currentPos,
+            angle: calculateReflectionAngle(carAngle, newPos, currentPos),
+            speed: Math.max(speed * 0.4, 0), // 속도 60% 감소
+            type: 'wall'
+        };
+    }
+
+    return { collision: false };
+};
+
+// 가장 가까운 도로 지점 찾기
+const findNearestRoadPoint = (pos, trackLayout) => {
+    const searchRadius = 5;
+    for (let radius = 1; radius <= searchRadius; radius++) {
+        for (let dy = -radius; dy <= radius; dy++) {
+            for (let dx = -radius; dx <= radius; dx++) {
+                const x = Math.floor(pos.x) + dx;
+                const y = Math.floor(pos.y) + dy;
+
+                if (x >= 0 && x < GRID_WIDTH && y >= 0 && y < GRID_HEIGHT) {
+                    if (isRoadCell(trackLayout[y][x])) {
+                        return { x: x + 0.5, y: y + 0.5 };
+                    }
+                }
+            }
+        }
+    }
+    return null;
+};
+
+// 반사 각도 계산
+const calculateReflectionAngle = (carAngle, collisionPos, prevPos) => {
+    // 충돌 방향 계산
+    const collisionDirX = collisionPos.x - prevPos.x;
+    const collisionDirY = collisionPos.y - prevPos.y;
+
+    // 충돌 각도 계산
+    const collisionAngle = Math.atan2(collisionDirY, collisionDirX) * 180 / Math.PI;
+
+    // 반사 각도 = 충돌 각도 + 180도 + 랜덤 요소
+    const reflectionAngle = collisionAngle + 180 + (Math.random() - 0.5) * 60;
+
+    return reflectionAngle;
+};
+
 // 2. 주요 상태 및 핸들러 분리
 const useIdealLine = () => {
     const [idealLine, setIdealLine] = useState([]); // 경로 포인트 배열
@@ -181,7 +250,8 @@ function useCarPhysics({
     idealLine,
     addPoint,
     onCheckpointPass,
-    setPathDeviation
+    setPathDeviation,
+    setCollisionEffect
 }) {
     const carAngleRef = useRef(carAngle);
     const speedRef = useRef(speed);
@@ -265,16 +335,19 @@ function useCarPhysics({
                 const newVelY = -Math.cos(angleRad) * newSpeed * 0.8;
                 const newX = prev.x + newVelX;
                 const newY = prev.y + newVelY;
-                const gridX = Math.floor(newX);
-                const gridY = Math.floor(newY);
 
-                if (gridX < 0 || gridX >= GRID_WIDTH || gridY < 0 || gridY >= GRID_HEIGHT) {
-                    newSpeed = 0;
-                    return prev;
-                }
-                if (!isRoadCell(trackLayout[gridY][gridX])) {
-                    newSpeed = Math.max(newSpeed - 3, 0);
-                    return prev;
+                // 충돌 감지 및 처리
+                const collision = calculateWallCollision(prev, { x: newX, y: newY }, newAngle, newSpeed, trackLayout);
+
+                if (collision.collision) {
+                    // 충돌 효과 표시
+                    setCollisionEffect({ type: collision.type, active: true });
+                    setTimeout(() => setCollisionEffect({ type: 'none', active: false }), 200);
+
+                    // 충돌 후 상태 업데이트
+                    setCarAngle(collision.angle);
+                    setSpeed(collision.speed);
+                    return collision.position;
                 }
 
                 // 아이디얼 라인 그리기
@@ -295,7 +368,7 @@ function useCarPhysics({
         }
         requestAnimationFrame(frame);
         return () => { running = false; };
-    }, [isRacing, isDrawing, isAIDriving, idealLine, trackLayout, addPoint, setCarAngle, setSpeed, setCarPosition, onCheckpointPass, setPathDeviation]);
+    }, [isRacing, isDrawing, isAIDriving, idealLine, trackLayout, addPoint, setCarAngle, setSpeed, setCarPosition, onCheckpointPass, setPathDeviation, setCollisionEffect]);
 }
 
 const F1RacingGame = () => {
@@ -322,6 +395,7 @@ const F1RacingGame = () => {
     const [hasPassedStart, setHasPassedStart] = useState(false);
     const [lapCount, setLapCount] = useState(0);
     const [cameraOffset, setCameraOffset] = useState({ x: 0, y: 0 });
+    const [collisionEffect, setCollisionEffect] = useState({ type: 'none', active: false });
     // keys를 useRef로만 관리하여 성능 최적화
     const keysRef = useRef({ up: false, down: false, left: false, right: false });
 
@@ -370,6 +444,7 @@ const F1RacingGame = () => {
         setHasPassedStart(false);
         setLapCount(0);
         setPathDeviation(0);
+        setCollisionEffect({ type: 'none', active: false });
     }, []);
 
     const stopRace = useCallback(() => {
@@ -439,7 +514,8 @@ const F1RacingGame = () => {
         idealLine,
         addPoint,
         onCheckpointPass,
-        setPathDeviation
+        setPathDeviation,
+        setCollisionEffect
     });
 
     // 키보드 입력 처리는 useEffect 내부에서 직접 처리
@@ -691,7 +767,8 @@ const F1RacingGame = () => {
                     />
                     {/* F1 차량 */}
                     <div
-                        className="absolute bg-red-500 rounded-sm flex items-center justify-center text-white text-lg font-bold transition-transform duration-75"
+                        className={`absolute bg-red-500 rounded-sm flex items-center justify-center text-white text-lg font-bold transition-transform duration-75 ${collisionEffect.active ? 'animate-pulse bg-yellow-500' : ''
+                            }`}
                         style={{
                             left: carPosition.x * GRID_SIZE - 18,
                             top: carPosition.y * GRID_SIZE - 18,
@@ -798,6 +875,7 @@ const F1RacingGame = () => {
                         <div>Space: Start/Restart</div>
                         <div>🔴 Red: Start/Finish Line</div>
                         <div>🔵 Blue: Pit Lane</div>
+                        <div>💥 Wall Collision: Bounce Physics</div>
                     </div>
                 </div>
             </div>
