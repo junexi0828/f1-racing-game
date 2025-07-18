@@ -98,7 +98,7 @@ const calculateWallCollision = (currentPos, newPos, carAngle, speed, trackLayout
             collision: true,
             position: currentPos, // 원래 위치 유지
             angle: carAngle + 180, // 반대 방향으로 튕김
-            speed: Math.max(speed * 0.3, 0), // 속도 70% 감소
+            speed: Math.max(speed * 0.1, 0), // 속도 90% 감소
             type: 'boundary'
         };
     }
@@ -112,7 +112,7 @@ const calculateWallCollision = (currentPos, newPos, carAngle, speed, trackLayout
             collision: true,
             position: nearestRoad || currentPos,
             angle: calculateReflectionAngle(carAngle, newPos, currentPos),
-            speed: Math.max(speed * 0.4, 0), // 속도 60% 감소
+            speed: Math.max(speed * 0.2, 0), // 속도 80% 감소
             type: 'wall'
         };
     }
