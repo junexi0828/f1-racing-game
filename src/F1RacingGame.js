@@ -43,21 +43,93 @@ const createTrackLayout = () => {
 // 도로 셀 판정 함수 (1, 2, 3이 도로)
 const isRoadCell = (cell) => cell === 1 || cell === 2 || cell === 3;
 
+// === 아이디얼 라인 유틸리티 함수들 ===
+// 두 점 사이의 거리 계산
+const distance = (p1, p2) => {
+    return Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2);
+};
+
+// 아이디얼 라인에서 가장 가까운 포인트 찾기
+const findNearestPoint = (currentPos, idealLine) => {
+    if (idealLine.length === 0) return null;
+
+    let nearest = idealLine[0];
+    let minDist = distance(currentPos, nearest);
+
+    for (let i = 1; i < idealLine.length; i++) {
+        const dist = distance(currentPos, idealLine[i]);
+        if (dist < minDist) {
+            minDist = dist;
+            nearest = idealLine[i];
+        }
+    }
+
+    return { point: nearest, distance: minDist };
+};
+
+// 경로 편차 계산 (아이디얼 라인에서 얼마나 벗어났는지)
+const calculatePathDeviation = (currentPos, idealLine) => {
+    const nearest = findNearestPoint(currentPos, idealLine);
+    return nearest ? nearest.distance : 0;
+};
+
+// AI 자동 주행을 위한 다음 목표점 찾기
+const findNextTargetPoint = (currentPos, idealLine, lookAhead = 5) => {
+    if (idealLine.length === 0) return null;
+
+    const nearest = findNearestPoint(currentPos, idealLine);
+    if (!nearest) return null;
+
+    const currentIndex = idealLine.indexOf(nearest.point);
+    const nextIndex = Math.min(currentIndex + lookAhead, idealLine.length - 1);
+
+    return idealLine[nextIndex];
+};
+
 // 2. 주요 상태 및 핸들러 분리
 const useIdealLine = () => {
-    const [idealLine, setIdealLine] = useState([]);
-    const [isDrawing, setIsDrawing] = useState(false);
+    const [idealLine, setIdealLine] = useState([]); // 경로 포인트 배열
+    const [isDrawing, setIsDrawing] = useState(false); // 그리기 모드
+    const [isAIDriving, setIsAIDriving] = useState(false); // AI 자동 주행 모드
+    const [pathDeviation, setPathDeviation] = useState(0); // 경로 편차
+    const [idealLineTime, setIdealLineTime] = useState(null); // 아이디얼 라인 기준 랩타임
 
     const startDrawing = useCallback(() => {
         setIsDrawing(true);
-        setIdealLine([]);
+        setIdealLine([]); // 새로 그리기 시작
+        setIsAIDriving(false); // AI 주행 중지
     }, []);
 
     const stopDrawing = useCallback(() => setIsDrawing(false), []);
-    const resetLine = useCallback(() => setIdealLine([]), []);
+    const resetLine = useCallback(() => {
+        setIdealLine([]);
+        setIsAIDriving(false);
+        setPathDeviation(0);
+        setIdealLineTime(null);
+    }, []);
     const addPoint = useCallback((point) => setIdealLine((prev) => [...prev, point]), []);
 
-    return { idealLine, isDrawing, startDrawing, stopDrawing, resetLine, addPoint };
+    // AI 자동 주행 토글
+    const toggleAIDriving = useCallback(() => {
+        if (idealLine.length > 10) { // 최소 10개 포인트 필요
+            setIsAIDriving(prev => !prev);
+        }
+    }, [idealLine.length]);
+
+    return {
+        idealLine,
+        isDrawing,
+        isAIDriving,
+        pathDeviation,
+        idealLineTime,
+        startDrawing,
+        stopDrawing,
+        resetLine,
+        addPoint,
+        toggleAIDriving,
+        setPathDeviation,
+        setIdealLineTime
+    };
 };
 
 // === 커스텀 훅: 키 입력 관리 ===
@@ -94,12 +166,28 @@ function useCarControls() {
     return keys;
 }
 
-// === 커스텀 훅: 차량 물리 처리 ===
-function useCarPhysics({ isRacing, carAngle, speed, setCarAngle, setSpeed, carPosition, setCarPosition, trackLayout, isDrawing, addPoint, onCheckpointPass }) {
+// === 커스텀 훅: 차량 물리 처리 (AI 주행 포함) ===
+function useCarPhysics({
+    isRacing,
+    carAngle,
+    speed,
+    setCarAngle,
+    setSpeed,
+    carPosition,
+    setCarPosition,
+    trackLayout,
+    isDrawing,
+    isAIDriving,
+    idealLine,
+    addPoint,
+    onCheckpointPass,
+    setPathDeviation
+}) {
     const carAngleRef = useRef(carAngle);
     const speedRef = useRef(speed);
     useEffect(() => { carAngleRef.current = carAngle; }, [carAngle]);
     useEffect(() => { speedRef.current = speed; }, [speed]);
+
     useEffect(() => {
         if (!isRacing) return;
         let running = true;
@@ -108,13 +196,42 @@ function useCarPhysics({ isRacing, carAngle, speed, setCarAngle, setSpeed, carPo
             setCarPosition(prev => {
                 let newAngle = carAngleRef.current;
                 let newSpeed = speedRef.current;
-                // 조향
-                if (window._carKeys?.left) newAngle -= 10;
-                if (window._carKeys?.right) newAngle += 10;
-                // 가속/감속
-                if (window._carKeys?.up) newSpeed = Math.min(newSpeed + 1.2, 15);
-                if (window._carKeys?.down) newSpeed = Math.max(newSpeed - 2.0, 0);
-                if (!window._carKeys?.up && !window._carKeys?.down) newSpeed = Math.max(newSpeed - 0.1, 0);
+
+                // AI 자동 주행 로직
+                if (isAIDriving && idealLine.length > 10) {
+                    const targetPoint = findNextTargetPoint(prev, idealLine, 8);
+                    if (targetPoint) {
+                        // 목표점을 향해 조향
+                        const targetAngle = Math.atan2(
+                            targetPoint.x - prev.x,
+                            -(targetPoint.y - prev.y)
+                        ) * 180 / Math.PI;
+
+                        // 부드러운 조향
+                        let angleDiff = targetAngle - newAngle;
+                        if (angleDiff > 180) angleDiff -= 360;
+                        if (angleDiff < -180) angleDiff += 360;
+
+                        newAngle += angleDiff * 0.1; // 부드러운 조향
+
+                        // AI 속도 제어
+                        const deviation = calculatePathDeviation(prev, idealLine);
+                        if (deviation < 2) {
+                            newSpeed = Math.min(newSpeed + 0.5, 12); // 편차가 작으면 가속
+                        } else {
+                            newSpeed = Math.max(newSpeed - 0.3, 5); // 편차가 크면 감속
+                        }
+                    }
+                } else {
+                    // 수동 조향
+                    if (window._carKeys?.left) newAngle -= 10;
+                    if (window._carKeys?.right) newAngle += 10;
+                    // 가속/감속
+                    if (window._carKeys?.up) newSpeed = Math.min(newSpeed + 1.2, 15);
+                    if (window._carKeys?.down) newSpeed = Math.max(newSpeed - 2.0, 0);
+                    if (!window._carKeys?.up && !window._carKeys?.down) newSpeed = Math.max(newSpeed - 0.1, 0);
+                }
+
                 const angleRad = (newAngle * Math.PI) / 180;
                 const newVelX = Math.sin(angleRad) * newSpeed * 0.8;
                 const newVelY = -Math.cos(angleRad) * newSpeed * 0.8;
@@ -122,6 +239,7 @@ function useCarPhysics({ isRacing, carAngle, speed, setCarAngle, setSpeed, carPo
                 const newY = prev.y + newVelY;
                 const gridX = Math.floor(newX);
                 const gridY = Math.floor(newY);
+
                 if (gridX < 0 || gridX >= GRID_WIDTH || gridY < 0 || gridY >= GRID_HEIGHT) {
                     newSpeed = 0;
                     return prev;
@@ -130,8 +248,16 @@ function useCarPhysics({ isRacing, carAngle, speed, setCarAngle, setSpeed, carPo
                     newSpeed = Math.max(newSpeed - 3, 0);
                     return prev;
                 }
+
                 // 아이디얼 라인 그리기
                 if (isDrawing) addPoint({ x: newX, y: newY });
+
+                // 경로 편차 계산
+                if (idealLine.length > 0) {
+                    const deviation = calculatePathDeviation({ x: newX, y: newY }, idealLine);
+                    setPathDeviation(deviation);
+                }
+
                 setCarAngle(newAngle);
                 setSpeed(newSpeed);
                 onCheckpointPass({ x: newX, y: newY });
@@ -141,7 +267,7 @@ function useCarPhysics({ isRacing, carAngle, speed, setCarAngle, setSpeed, carPo
         }
         requestAnimationFrame(frame);
         return () => { running = false; };
-    }, [isRacing, isDrawing, trackLayout, addPoint, setCarAngle, setSpeed, setCarPosition, onCheckpointPass]);
+    }, [isRacing, isDrawing, isAIDriving, idealLine, trackLayout, addPoint, setCarAngle, setSpeed, setCarPosition, onCheckpointPass, setPathDeviation]);
 }
 
 const F1RacingGame = () => {
@@ -185,8 +311,21 @@ const F1RacingGame = () => {
     useEffect(() => { lapStartTimeRef.current = lapStartTime; }, [lapStartTime]);
     useEffect(() => { bestLapTimeRef.current = bestLapTime; }, [bestLapTime]);
 
-    // 아이디얼 라인 핸들러
-    const { idealLine, isDrawing, startDrawing, stopDrawing, resetLine, addPoint } = useIdealLine();
+    // 아이디얼 라인 핸들러 (확장된 기능 포함)
+    const {
+        idealLine,
+        isDrawing,
+        isAIDriving,
+        pathDeviation,
+        idealLineTime,
+        startDrawing,
+        stopDrawing,
+        resetLine,
+        addPoint,
+        toggleAIDriving,
+        setPathDeviation,
+        setIdealLineTime
+    } = useIdealLine();
     const addPointRef = useRef(addPoint);
 
     // addPoint ref 업데이트
@@ -202,13 +341,17 @@ const F1RacingGame = () => {
         setLapStartTime(null);
         setHasPassedStart(false);
         setLapCount(0);
+        setPathDeviation(0);
     }, []);
 
     const stopRace = useCallback(() => {
         setIsRacing(false);
         setSpeed(0);
         setLapStartTime(null);
-    }, []);
+        if (isAIDriving) {
+            toggleAIDriving(); // AI 주행 중지
+        }
+    }, [isAIDriving, toggleAIDriving]);
 
     // 체크포인트 제거
     const checkpoints = [];
@@ -237,6 +380,12 @@ const F1RacingGame = () => {
                 setCurrentLapTime(lapTime);
                 setLapCount(prev => prev + 1);
                 if (!bestLapTime || lapTime < bestLapTime) setBestLapTime(lapTime);
+
+                // 아이디얼 라인 기준 랩타임 설정 (첫 번째 완주 시)
+                if (idealLine.length > 10 && !idealLineTime) {
+                    setIdealLineTime(lapTime);
+                }
+
                 setLapStartTime(Date.now());
                 setHasPassedStart(false);
                 setPassedAllCheckpoints(false);
@@ -245,9 +394,9 @@ const F1RacingGame = () => {
                 if (!lapStartTime) setLapStartTime(Date.now());
             }
         }
-    }, [carPosition, isRacing, passedAllCheckpoints, hasPassedStart, lapStartTime, bestLapTime, trackLayout]);
+    }, [carPosition, isRacing, passedAllCheckpoints, hasPassedStart, lapStartTime, bestLapTime, trackLayout, idealLine.length, idealLineTime, setIdealLineTime]);
 
-    // 차량 물리 커스텀 훅
+    // 차량 물리 커스텀 훅 (AI 주행 포함)
     useCarPhysics({
         isRacing,
         carAngle,
@@ -258,8 +407,11 @@ const F1RacingGame = () => {
         setCarPosition,
         trackLayout,
         isDrawing,
+        isAIDriving,
+        idealLine,
         addPoint,
-        onCheckpointPass
+        onCheckpointPass,
+        setPathDeviation
     });
 
     // 키보드 입력 처리는 useEffect 내부에서 직접 처리
@@ -298,6 +450,11 @@ const F1RacingGame = () => {
                 case 'i':
                     isDrawing ? stopDrawing() : startDrawing();
                     break;
+                case 'o': // AI 자동 주행 토글
+                    if (idealLine.length > 10) {
+                        toggleAIDriving();
+                    }
+                    break;
                 default: break;
             }
         };
@@ -329,7 +486,7 @@ const F1RacingGame = () => {
             window.removeEventListener('keydown', keyDownHandler);
             window.removeEventListener('keyup', keyUpHandler);
         };
-    }, [isRacing, isDrawing, startRace]);
+    }, [isRacing, isDrawing, idealLine.length, startRace, toggleAIDriving]);
 
     // 카메라 팔로우
     useEffect(() => {
@@ -373,6 +530,12 @@ const F1RacingGame = () => {
                     </div>
                 </div>
                 <div className="bg-gray-800 p-2 rounded">
+                    <div className="text-gray-300">Ideal Line Time</div>
+                    <div className="text-lg font-mono text-cyan-400">
+                        {idealLineTime ? formatTime(idealLineTime) : '--:--'}
+                    </div>
+                </div>
+                <div className="bg-gray-800 p-2 rounded">
                     <div className="text-gray-300">Laps</div>
                     <div className="text-lg font-mono">{lapCount}</div>
                 </div>
@@ -381,8 +544,16 @@ const F1RacingGame = () => {
                     <div className="text-lg font-mono">{speed.toFixed(1)}</div>
                 </div>
                 <div className="bg-gray-800 p-2 rounded">
+                    <div className="text-gray-300">Path Deviation</div>
+                    <div className="text-lg font-mono text-orange-400">{pathDeviation.toFixed(1)}</div>
+                </div>
+                <div className="bg-gray-800 p-2 rounded">
                     <div className="text-gray-300">Ideal Line</div>
                     <div className="text-lg font-mono">{isDrawing ? 'ON' : 'OFF'}</div>
+                </div>
+                <div className="bg-gray-800 p-2 rounded">
+                    <div className="text-gray-300">AI Driving</div>
+                    <div className="text-lg font-mono text-green-400">{isAIDriving ? 'ON' : 'OFF'}</div>
                 </div>
             </div>
             {/* 게임 뷰포트 */}
@@ -470,6 +641,20 @@ const F1RacingGame = () => {
                                 ctx.strokeStyle = 'rgba(0,255,255,0.7)';
                                 ctx.lineWidth = 3;
                                 ctx.stroke();
+
+                                // AI 주행 중일 때 목표점 표시
+                                if (isAIDriving && idealLine.length > 0) {
+                                    const targetPoint = findNextTargetPoint(carPosition, idealLine, 8);
+                                    if (targetPoint) {
+                                        ctx.beginPath();
+                                        ctx.arc(targetPoint.x * GRID_SIZE, targetPoint.y * GRID_SIZE, 8, 0, 2 * Math.PI);
+                                        ctx.fillStyle = 'rgba(255,255,0,0.8)';
+                                        ctx.fill();
+                                        ctx.strokeStyle = 'rgba(255,255,0,1)';
+                                        ctx.lineWidth = 2;
+                                        ctx.stroke();
+                                    }
+                                }
                             }
                         }}
                         style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none', zIndex: 3 }}
@@ -487,7 +672,7 @@ const F1RacingGame = () => {
                             fontSize: 32 // 이모티콘도 같이 커지게
                         }}
                     >
-                        🐷
+                        {isAIDriving ? '🤖' : '🐷'}
                     </div>
                 </div>
                 {/* 미니맵 */}
@@ -560,6 +745,13 @@ const F1RacingGame = () => {
                     >
                         Clear Line
                     </button>
+                    <button
+                        onClick={toggleAIDriving}
+                        disabled={idealLine.length < 10}
+                        className={`px-4 py-2 rounded font-bold ${isAIDriving ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700'} ${idealLine.length < 10 ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    >
+                        {isAIDriving ? 'Stop AI' : 'Start AI'} (O)
+                    </button>
                 </div>
                 <div className="text-sm text-gray-400 grid grid-cols-2 gap-4">
                     <div>
@@ -572,6 +764,7 @@ const F1RacingGame = () => {
                     <div>
                         <div className="font-bold mb-1">🎯 Features:</div>
                         <div>I: Toggle Ideal Line</div>
+                        <div>O: Toggle AI Driving</div>
                         <div>Space: Start/Restart</div>
                         <div>🔴 Red: Start/Finish Line</div>
                         <div>🔵 Blue: Pit Lane</div>
