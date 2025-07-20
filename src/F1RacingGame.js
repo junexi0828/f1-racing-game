@@ -1257,8 +1257,8 @@ const F1RacingGame = () => {
                         <div>S/↓: Brake/Reverse</div>
                         <div>A/←: Turn Left</div>
                         <div>D/→: Turn Right</div>
-                        <div>Q/ㅂ: Shift Up</div>
-                        <div>E/ㄷ: Shift Down</div>
+                        <div>Q: Shift Up</div>
+                        <div>E: Shift Down</div>
                     </div>
                     <div>
                         <div className="font-bold mb-1">🎯 Features:</div>
