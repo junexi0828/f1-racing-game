@@ -9,6 +9,25 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 
+// --- 분리된 함수/로직 import ---
+import { createTrackLayout, isRoadCell } from './track/trackLayout';
+import { calculateWallCollision, findNearestRoadPoint, calculateReflectionAngle } from './engine/physicsEngine';
+import { findNextTargetPoint, calculatePathDeviation } from './ai/aiController';
+
+// --- 아래 함수들은 분리 모듈로 이동했으므로 주석처리 ---
+/*
+const createTrackLayout = ...
+const isRoadCell = ...
+const calculateWallCollision = ...
+const findNearestRoadPoint = ...
+const calculateReflectionAngle = ...
+const findNextTargetPoint = ...
+const calculatePathDeviation = ...
+const findNearestPoint = ...
+const distance = ...
+*/
+// 나머지 기존 코드 유지
+
 // 1. 대형 서킷 그리드 및 trackLayout 분리
 const GRID_SIZE = 6;
 const GRID_WIDTH = 200;
@@ -34,146 +53,146 @@ const GEAR_SYSTEM = {
 };
 
 // 1. 트랙 생성 함수 (나스카 원형, 도로폭 넓게, 스타트/피니시 라인 포함)
-const createTrackLayout = () => {
-    const W = 200, H = 120;
-    const layout = Array(H).fill().map(() => Array(W).fill(0)); // 0=오프로드
+// const createTrackLayout = () => {
+//     const W = 200, H = 120;
+//     const layout = Array(H).fill().map(() => Array(W).fill(0)); // 0=오프로드
 
-    // === 원형 트랙 ===
-    const cx = W / 2, cy = H / 2;
-    const outerR = 60; // 바깥 반지름
-    const innerR = 35; // 안쪽 반지름
-    for (let y = 0; y < H; y++) {
-        for (let x = 0; x < W; x++) {
-            const dx = (x - cx) / 1.1; // 타원 비율 조정
-            const dy = (y - cy);
-            const dist = Math.sqrt(dx * dx + dy * dy);
-            if (dist < outerR && dist > innerR) layout[y][x] = 1; // 도로(흰색)
-        }
-    }
-    // === 스타트/피니시 라인 (트랙 중앙 y, 도로 셀만 2로) ===
-    const startFinishY = Math.floor(cy);
-    for (let x = Math.floor(cx - outerR); x < Math.floor(cx + outerR); x++) {
-        if (x >= 0 && x < W && layout[startFinishY][x] === 1) {
-            layout[startFinishY][x] = 2; // 도로 셀만 2번으로 바꿈
-        }
-    }
-    return layout;
-};
+//     // === 원형 트랙 ===
+//     const cx = W / 2, cy = H / 2;
+//     const outerR = 60; // 바깥 반지름
+//     const innerR = 35; // 안쪽 반지름
+//     for (let y = 0; y < H; y++) {
+//         for (let x = 0; x < W; x++) {
+//             const dx = (x - cx) / 1.1; // 타원 비율 조정
+//             const dy = (y - cy);
+//             const dist = Math.sqrt(dx * dx + dy * dy);
+//             if (dist < outerR && dist > innerR) layout[y][x] = 1; // 도로(흰색)
+//         }
+//     }
+//     // === 스타트/피니시 라인 (트랙 중앙 y, 도로 셀만 2로) ===
+//     const startFinishY = Math.floor(cy);
+//     for (let x = Math.floor(cx - outerR); x < Math.floor(cx + outerR); x++) {
+//         if (x >= 0 && x < W && layout[startFinishY][x] === 1) {
+//             layout[startFinishY][x] = 2; // 도로 셀만 2번으로 바꿈
+//         }
+//     }
+//     return layout;
+// };
 
 // 도로 셀 판정 함수 (1, 2, 3이 도로)
-const isRoadCell = (cell) => cell === 1 || cell === 2 || cell === 3;
+// const isRoadCell = (cell) => cell === 1 || cell === 2 || cell === 3;
 
 // === 아이디얼 라인 유틸리티 함수들 ===
 // 두 점 사이의 거리 계산
-const distance = (p1, p2) => {
-    return Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2);
-};
+// const distance = (p1, p2) => {
+//     return Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2);
+// };
 
 // 아이디얼 라인에서 가장 가까운 포인트 찾기
-const findNearestPoint = (currentPos, idealLine) => {
-    if (idealLine.length === 0) return null;
+// const findNearestPoint = (currentPos, idealLine) => {
+//     if (idealLine.length === 0) return null;
 
-    let nearest = idealLine[0];
-    let minDist = distance(currentPos, nearest);
+//     let nearest = idealLine[0];
+//     let minDist = distance(currentPos, nearest);
 
-    for (let i = 1; i < idealLine.length; i++) {
-        const dist = distance(currentPos, idealLine[i]);
-        if (dist < minDist) {
-            minDist = dist;
-            nearest = idealLine[i];
-        }
-    }
+//     for (let i = 1; i < idealLine.length; i++) {
+//         const dist = distance(currentPos, idealLine[i]);
+//         if (dist < minDist) {
+//             minDist = dist;
+//             nearest = idealLine[i];
+//         }
+//     }
 
-    return { point: nearest, distance: minDist };
-};
+//     return { point: nearest, distance: minDist };
+// };
 
 // 경로 편차 계산 (아이디얼 라인에서 얼마나 벗어났는지)
-const calculatePathDeviation = (currentPos, idealLine) => {
-    const nearest = findNearestPoint(currentPos, idealLine);
-    return nearest ? nearest.distance : 0;
-};
+// const calculatePathDeviation = (currentPos, idealLine) => {
+//     const nearest = findNearestPoint(currentPos, idealLine);
+//     return nearest ? nearest.distance : 0;
+// };
 
 // AI 자동 주행을 위한 다음 목표점 찾기
-const findNextTargetPoint = (currentPos, idealLine, lookAhead = 5) => {
-    if (idealLine.length === 0) return null;
+// const findNextTargetPoint = (currentPos, idealLine, lookAhead = 5) => {
+//     if (idealLine.length === 0) return null;
 
-    const nearest = findNearestPoint(currentPos, idealLine);
-    if (!nearest) return null;
+//     const nearest = findNearestPoint(currentPos, idealLine);
+//     if (!nearest) return null;
 
-    const currentIndex = idealLine.indexOf(nearest.point);
-    const nextIndex = Math.min(currentIndex + lookAhead, idealLine.length - 1);
+//     const currentIndex = idealLine.indexOf(nearest.point);
+//     const nextIndex = Math.min(currentIndex + lookAhead, idealLine.length - 1);
 
-    return idealLine[nextIndex];
-};
+//     return idealLine[nextIndex];
+// };
 
 // === 충돌 물리 시스템 ===
 // 벽과의 충돌 감지 및 반사 계산
-const calculateWallCollision = (currentPos, newPos, carAngle, speed, trackLayout) => {
-    const gridX = Math.floor(newPos.x);
-    const gridY = Math.floor(newPos.y);
+// const calculateWallCollision = (currentPos, newPos, carAngle, speed, trackLayout) => {
+//     const gridX = Math.floor(newPos.x);
+//     const gridY = Math.floor(newPos.y);
 
-    // 트랙 밖으로 나간 경우
-    if (gridX < 0 || gridX >= GRID_WIDTH || gridY < 0 || gridY >= GRID_HEIGHT) {
-        return {
-            collision: true,
-            position: currentPos, // 원래 위치 유지
-            angle: carAngle + 180, // 반대 방향으로 튕김
-            speed: Math.max(speed * 0.1, 0), // 속도 90% 감소
-            type: 'boundary'
-        };
-    }
+//     // 트랙 밖으로 나간 경우
+//     if (gridX < 0 || gridX >= GRID_WIDTH || gridY < 0 || gridY >= GRID_HEIGHT) {
+//         return {
+//             collision: true,
+//             position: currentPos, // 원래 위치 유지
+//             angle: carAngle + 180, // 반대 방향으로 튕김
+//             speed: Math.max(speed * 0.1, 0), // 속도 90% 감소
+//             type: 'boundary'
+//         };
+//     }
 
-    // 오프로드(벽)에 부딪힌 경우
-    if (!isRoadCell(trackLayout[gridY][gridX])) {
-        // 충돌 지점에서 가장 가까운 도로 찾기
-        const nearestRoad = findNearestRoadPoint(newPos, trackLayout);
+//     // 오프로드(벽)에 부딪힌 경우
+//     if (!isRoadCell(trackLayout[gridY][gridX])) {
+//         // 충돌 지점에서 가장 가까운 도로 찾기
+//         const nearestRoad = findNearestRoadPoint(newPos, trackLayout);
 
-        return {
-            collision: true,
-            position: nearestRoad || currentPos,
-            angle: calculateReflectionAngle(carAngle, newPos, currentPos),
-            speed: Math.max(speed * 0.2, 0), // 속도 80% 감소
-            type: 'wall'
-        };
-    }
+//         return {
+//             collision: true,
+//             position: nearestRoad || currentPos,
+//             angle: calculateReflectionAngle(carAngle, newPos, currentPos),
+//             speed: Math.max(speed * 0.2, 0), // 속도 80% 감소
+//             type: 'wall'
+//         };
+//     }
 
-    return { collision: false };
-};
+//     return { collision: false };
+// };
 
 // 가장 가까운 도로 지점 찾기
-const findNearestRoadPoint = (pos, trackLayout) => {
-    const searchRadius = 5;
-    for (let radius = 1; radius <= searchRadius; radius++) {
-        for (let dy = -radius; dy <= radius; dy++) {
-            for (let dx = -radius; dx <= radius; dx++) {
-                const x = Math.floor(pos.x) + dx;
-                const y = Math.floor(pos.y) + dy;
+// const findNearestRoadPoint = (pos, trackLayout) => {
+//     const searchRadius = 5;
+//     for (let radius = 1; radius <= searchRadius; radius++) {
+//         for (let dy = -radius; dy <= radius; dy++) {
+//             for (let dx = -radius; dx <= radius; dx++) {
+//                 const x = Math.floor(pos.x) + dx;
+//                 const y = Math.floor(pos.y) + dy;
 
-                if (x >= 0 && x < GRID_WIDTH && y >= 0 && y < GRID_HEIGHT) {
-                    if (isRoadCell(trackLayout[y][x])) {
-                        return { x: x + 0.5, y: y + 0.5 };
-                    }
-                }
-            }
-        }
-    }
-    return null;
-};
+//                 if (x >= 0 && x < GRID_WIDTH && y >= 0 && y < GRID_HEIGHT) {
+//                     if (isRoadCell(trackLayout[y][x])) {
+//                         return { x: x + 0.5, y: y + 0.5 };
+//                     }
+//                 }
+//             }
+//         }
+//     }
+//     return null;
+// };
 
 // 반사 각도 계산
-const calculateReflectionAngle = (carAngle, collisionPos, prevPos) => {
-    // 충돌 방향 계산
-    const collisionDirX = collisionPos.x - prevPos.x;
-    const collisionDirY = collisionPos.y - prevPos.y;
+// const calculateReflectionAngle = (carAngle, collisionPos, prevPos) => {
+//     // 충돌 방향 계산
+//     const collisionDirX = collisionPos.x - prevPos.x;
+//     const collisionDirY = collisionPos.y - prevPos.y;
 
-    // 충돌 각도 계산
-    const collisionAngle = Math.atan2(collisionDirY, collisionDirX) * 180 / Math.PI;
+//     // 충돌 각도 계산
+//     const collisionAngle = Math.atan2(collisionDirY, collisionDirX) * 180 / Math.PI;
 
-    // 반사 각도 = 충돌 각도 + 180도 + 랜덤 요소
-    const reflectionAngle = collisionAngle + 180 + (Math.random() - 0.5) * 60;
+//     // 반사 각도 = 충돌 각도 + 180도 + 랜덤 요소
+//     const reflectionAngle = collisionAngle + 180 + (Math.random() - 0.5) * 60;
 
-    return reflectionAngle;
-};
+//     return reflectionAngle;
+// };
 
 // 2. 주요 상태 및 핸들러 분리
 const useIdealLine = () => {
