@@ -11,7 +11,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 
 // --- 분리된 함수/로직 import ---
 import { createTrackLayout, isRoadCell } from './track/trackLayout';
-import { calculateWallCollision, findNearestRoadPoint, calculateReflectionAngle } from './engine/physicsEngine';
+import { updateVehiclePhysics, calculateWallCollision, findNearestRoadPoint, calculateReflectionAngle } from './engine/physicsEngine';
 import { findNextTargetPoint, calculatePathDeviation } from './ai/aiController';
 
 // --- 아래 함수들은 분리 모듈로 이동했으므로 주석처리 ---
@@ -36,7 +36,7 @@ const GRID_HEIGHT = 120;
 // 일반 차량 기준 변속 시스템 상수
 const GEAR_SYSTEM = {
     // 기어별 최고 속도 (KM/h 기준, 일반 차량)
-    MAX_SPEED_PER_GEAR: [0, 0, 25, 45, 70, 100, 130, 160], // N(0), R(1), 1-6단 - 현실적으로 조정
+    MAX_SPEED_PER_GEAR: [0, 0, 35, 60, 90, 130, 170, 210], // N(0), R(1), 1-6단 - 현실적으로 조정
     // 기어별 속도 비율 (RPM → 속도 변환 계수) - 더 현실적으로 조정
     GEAR_SPEED_RATIO: [0, 0, 0.010, 0.013, 0.016, 0.019, 0.022, 0.025], // N(0), R(1), 1-6단 - 현실적으로 조정
     // 최적 변속 RPM (일반 차량 기준) - 더 낮은 임계값
@@ -250,15 +250,34 @@ function useGearSystem() {
     const [gearDisplay, setGearDisplay] = useState('1');
     const [isInitialized, setIsInitialized] = useState(false);
 
+    // === [기어 범위 강제 제한 및 디버깅 로그 추가] ===
+    // safeSetCurrentGear를 최상단에 선언 (모든 참조보다 먼저!)
+    const safeSetCurrentGear = useCallback((newGear) => {
+        const maxGear = GEAR_SYSTEM.MAX_SPEED_PER_GEAR.length - 1;
+        const safeGear = Math.min(Math.max(newGear, 0), maxGear);
+        if (safeGear !== newGear) {
+            console.warn('setCurrentGear: Invalid gear', newGear, '->', safeGear);
+        }
+        setCurrentGear(safeGear);
+    }, []);
+
     // 기어 값 유효성 검사 및 수정 (무한 루프 방지)
     useEffect(() => {
         // N(0), R(1), 1-6단(2-7) 범위 검사
         if (currentGear < 0 || currentGear > 7) {
             console.warn('Invalid gear value detected:', currentGear, 'resetting to N(0)');
-            // 무한 루프 방지를 위해 조건 확인 후 설정
             if (currentGear !== 0) {
                 setCurrentGear(0);
             }
+        }
+        // === [기어 범위 강제 제한] ===
+        const maxGear = GEAR_SYSTEM.MAX_SPEED_PER_GEAR.length - 1; // 7(6단)
+        if (currentGear > maxGear) {
+            console.warn('Gear exceeds maxGear:', currentGear, '->', maxGear);
+            setCurrentGear(maxGear);
+        }
+        if (currentGear < 0) {
+            setCurrentGear(0);
         }
     }, [currentGear]);
 
@@ -292,16 +311,24 @@ function useGearSystem() {
             return GEAR_SYSTEM.IDLE_RPM;
         }
 
-        if (typeof gear !== 'number' || gear < 0 || gear > 6) {
-            console.warn('Invalid gear value:', gear);
+        // === 기어 범위 방어 코드 추가 ===
+        const maxGear = GEAR_SYSTEM.MAX_SPEED_PER_GEAR.length - 1;
+        const safeGear = Math.min(Math.max(gear, 0), maxGear);
+        if (safeGear !== gear) {
+            console.warn(`Invalid gear corrected: ${gear} -> ${safeGear}`);
+        }
+
+        if (safeGear === 0) return GEAR_SYSTEM.IDLE_RPM; // 중립
+
+        // === getGearSpeedLimit undefined 방지 ===
+        const gearSpeedRatio = GEAR_SYSTEM.GEAR_SPEED_RATIO[safeGear];
+        if (typeof gearSpeedRatio !== 'number' || isNaN(gearSpeedRatio) || gearSpeedRatio === 0) {
+            console.warn('getGearSpeedLimit: invalid for gear', safeGear, 'fallback 0.01');
             return GEAR_SYSTEM.IDLE_RPM;
         }
 
-        if (gear === 0) return GEAR_SYSTEM.IDLE_RPM; // 후진
-
         // 일반 차량 기준 RPM 계산: 속도를 KM/h로 변환 후 RPM 계산
         const speedKMH = Math.abs(speed) * 10; // 게임 속도를 KM/h로 변환 (대략적)
-        const gearSpeedRatio = GEAR_SYSTEM.GEAR_SPEED_RATIO[gear];
         const rpm = speedKMH / gearSpeedRatio;
 
         const result = Math.max(GEAR_SYSTEM.IDLE_RPM,
@@ -309,66 +336,59 @@ function useGearSystem() {
 
         // 디버깅: RPM 계산 (속도가 있을 때만) - 로그 빈도 줄임
         if (speed > 5.0) { // 로그 빈도 더 줄임
-            console.log(`RPM Calc - Speed: ${speed.toFixed(1)} (${speedKMH.toFixed(0)}km/h), Gear: ${gear}, RPM: ${Math.round(result)}`);
+            console.log(`RPM Calc - Speed: ${speed.toFixed(1)} (${speedKMH.toFixed(0)}km/h), Gear: ${safeGear}, RPM: ${Math.round(result)}`);
         }
 
         return result;
     }, []);
 
     // 자동 변속 로직 - 안전한 범위 제한
-    const autoShift = useCallback((currentRPM, currentSpeed) => {
+    const autoShift = useCallback((currentRPM, currentSpeed, throttle = 0) => {
         const now = Date.now();
         if (now - lastShiftTime < GEAR_SYSTEM.AUTO_SHIFT_DELAY) return;
-
-        // 기어 유효성 검사 및 안전한 범위로 제한 (N, R, 1-6단)
         let safeGear = currentGear;
-        if (currentGear < 0 || currentGear > 7) {
-            console.warn(`Invalid gear for auto shift: ${currentGear}, resetting to N(0)`);
-            setCurrentGear(0);
+        const maxGear = GEAR_SYSTEM.MAX_SPEED_PER_GEAR.length - 1;
+        if (currentGear < 0 || currentGear > maxGear) {
+            safeSetCurrentGear(0);
             return;
         }
-
-        // N(0)이나 R(1)에서는 자동 변속하지 않음
+        // N(중립)에서 가속 페달 입력 시 1단으로 자동 변속
+        if (safeGear === 0 && throttle > 0) {
+            safeSetCurrentGear(2);
+            setLastShiftTime(now);
+            return;
+        }
+        // R(후진)에서 가속 페달 입력 시 N으로 변속
+        if (safeGear === 1 && throttle > 0) {
+            safeSetCurrentGear(0);
+            setLastShiftTime(now);
+            return;
+        }
         if (safeGear === 0 || safeGear === 1) {
             return;
         }
-
-        // 현재 기어가 유효한지 다시 한번 확인 (1-6단만)
-        if (safeGear < 2 || safeGear > 7) {
-            console.warn(`Safe gear validation failed: ${safeGear}, skipping auto shift`);
+        if (safeGear < 2 || safeGear > maxGear) {
             return;
         }
-
         const optimalRPM = GEAR_SYSTEM.OPTIMAL_SHIFT_RPM[safeGear];
-
-        // 업시프트 (고 RPM에서 상위 기어로) - 안전한 범위 내에서만 (1-6단)
-        if (currentRPM > optimalRPM * 0.8 && safeGear < 7) {
+        // === [기어 업 조건 보수적 조정] ===
+        if (currentRPM > optimalRPM * 0.95 && safeGear < maxGear) {
             const newGear = safeGear + 1;
-            if (newGear <= 7) {
-                setCurrentGear(newGear);
-                console.log(`Auto shift up: ${safeGear - 1} -> ${newGear - 1} (RPM: ${Math.round(currentRPM)} > ${Math.round(optimalRPM * 0.8)})`);
-                setLastShiftTime(now);
-            }
+            safeSetCurrentGear(newGear);
+            setLastShiftTime(now);
             return;
         }
-
-        // 6단에서 더 이상 업시프트하지 않도록 방지
-        if (safeGear >= 7 && currentRPM > optimalRPM * 0.8) {
-            // 6단에서는 업시프트 시도하지 않음
+        if (safeGear >= maxGear && currentRPM > optimalRPM * 0.95) {
             return;
         }
-
-        // 다운시프트 (낮은 RPM에서 하위 기어로) - 안전한 범위 내에서만 (1-6단)
+        // 다운시프트: 낮은 RPM에서 하위 기어로
         if (currentRPM < optimalRPM * 0.5 && safeGear > 2) {
             const newGear = safeGear - 1;
-            if (newGear >= 2) {
-                setCurrentGear(newGear);
-                console.log(`Auto shift down: ${safeGear - 1} -> ${newGear - 1} (RPM: ${Math.round(currentRPM)} < ${Math.round(optimalRPM * 0.5)})`);
-                setLastShiftTime(now);
-            }
+            safeSetCurrentGear(newGear);
+            setLastShiftTime(now);
             return;
         }
-    }, [currentGear, lastShiftTime]);
+    }, [currentGear, lastShiftTime, safeSetCurrentGear]);
 
     // 수동 변속 (순차적 변속 보장)
     const manualShift = useCallback((direction) => {
@@ -377,20 +397,16 @@ function useGearSystem() {
 
         if (direction === 'up' && currentGear < 7) {
             const newGear = currentGear + 1;
-            if (newGear <= 7) {
-                setCurrentGear(newGear);
-                console.log(`Manual shift up: ${currentGear === 0 ? 'N' : currentGear === 1 ? 'R' : (currentGear - 1).toString()} -> ${newGear === 0 ? 'N' : newGear === 1 ? 'R' : (newGear - 1).toString()}`);
-                setLastShiftTime(now);
-            }
+            safeSetCurrentGear(newGear);
+            console.log(`Manual shift up: ${currentGear === 0 ? 'N' : currentGear === 1 ? 'R' : (currentGear - 1).toString()} -> ${newGear === 0 ? 'N' : newGear === 1 ? 'R' : (newGear - 1).toString()}`);
+            setLastShiftTime(now);
         } else if (direction === 'down' && currentGear > 0) {
             const newGear = currentGear - 1;
-            if (newGear >= 0) {
-                setCurrentGear(newGear);
-                console.log(`Manual shift down: ${currentGear === 0 ? 'N' : currentGear === 1 ? 'R' : (currentGear - 1).toString()} -> ${newGear === 0 ? 'N' : newGear === 1 ? 'R' : (newGear - 1).toString()}`);
-                setLastShiftTime(now);
-            }
+            safeSetCurrentGear(newGear);
+            console.log(`Manual shift down: ${currentGear === 0 ? 'N' : currentGear === 1 ? 'R' : (currentGear - 1).toString()} -> ${newGear === 0 ? 'N' : newGear === 1 ? 'R' : (newGear - 1).toString()}`);
+            setLastShiftTime(now);
         }
-    }, [currentGear, lastShiftTime]);
+    }, [currentGear, lastShiftTime, safeSetCurrentGear]);
 
     // 기어 표시 업데이트 (N, R, 1-6단)
     useEffect(() => {
@@ -414,16 +430,15 @@ function useGearSystem() {
 
     // 현실적인 RPM 업데이트 (프레임당 제한)
     const updateRPM = useCallback((speed, throttle) => {
-        // 기어 값 안전성 검사 (R 기어는 0으로 유지, 나머지는 1-6 범위로 제한)
-        let safeGear = currentGear;
-        if (currentGear !== 0) {
-            safeGear = Math.max(1, Math.min(6, currentGear));
-            if (safeGear !== currentGear) {
-                console.warn(`Invalid gear corrected: ${currentGear} -> ${safeGear}`);
-                // 무한 루프 방지를 위해 조건 확인 후 설정
-                if (currentGear !== safeGear) {
-                    setCurrentGear(safeGear);
-                }
+        // === 기어 값 안전성 검사 (배열 기반 동적 범위로 교체) ===
+        const maxGear = GEAR_SYSTEM.MAX_SPEED_PER_GEAR.length - 1;
+        let safeGear = Math.min(Math.max(currentGear, 0), maxGear);
+
+        if (safeGear !== currentGear) {
+            console.warn(`Invalid gear corrected: ${currentGear} -> ${safeGear}`);
+            // 무한 루프 방지를 위해 조건 확인 후 설정
+            if (currentGear !== safeGear) {
+                setCurrentGear(safeGear);
             }
         }
 
@@ -450,6 +465,20 @@ function useGearSystem() {
         }
     }, [currentGear, calculateRPM]);
 
+    // === getGearSpeedLimit: undefined 반환 방지 (개선) ===
+    const getGearSpeedLimit = useCallback((gear) => {
+        const maxGear = GEAR_SYSTEM.MAX_SPEED_PER_GEAR.length - 1;
+        const safeGear = Math.min(Math.max(gear, 0), maxGear);
+        const limit = GEAR_SYSTEM.MAX_SPEED_PER_GEAR[safeGear];
+
+        if (typeof limit !== 'number' || isNaN(limit)) {
+            console.warn('getGearSpeedLimit: invalid for gear', gear, '->', safeGear, 'fallback 85');
+            return 85; // 더 현실적인 fallback 값
+        }
+
+        return limit;
+    }, []);
+
     return {
         currentGear,
         engineRPM,
@@ -461,9 +490,10 @@ function useGearSystem() {
         updateRPM,
         setIsAutoShift,
         setManualShiftMode,
-        setCurrentGear, // 직접 기어 변경 함수 추가
+        setCurrentGear: safeSetCurrentGear, // 안전한 기어 변경 함수로 교체
         // 디버깅용: 현재 기어 상태 확인
-        getCurrentGear: () => currentGear
+        getCurrentGear: () => currentGear,
+        getGearSpeedLimit // 추가 반환
     };
 }
 
@@ -478,8 +508,16 @@ function useCarControls() {
                 case 'arrowdown': case 's': case 'ㄴ': keys.current.down = true; break;
                 case 'arrowleft': case 'a': case 'ㅁ': keys.current.left = true; break;
                 case 'arrowright': case 'd': case 'ㅇ': keys.current.right = true; break;
-                case 'q': case 'ㅂ': keys.current.shiftUp = true; break; // 업시프트
-                case 'e': case 'ㄷ': keys.current.shiftDown = true; break; // 다운시프트
+                case 'q': case 'ㅂ':
+                    keys.current.shiftUp = true;
+                    // window._carKeys와 동기화
+                    if (window._carKeys) window._carKeys.shiftUp = true;
+                    break; // 업시프트
+                case 'e': case 'ㄷ':
+                    keys.current.shiftDown = true;
+                    // window._carKeys와 동기화
+                    if (window._carKeys) window._carKeys.shiftDown = true;
+                    break; // 다운시프트
                 default: break;
             }
         };
@@ -490,8 +528,16 @@ function useCarControls() {
                 case 'arrowdown': case 's': case 'ㄴ': keys.current.down = false; break;
                 case 'arrowleft': case 'a': case 'ㅁ': keys.current.left = false; break;
                 case 'arrowright': case 'd': case 'ㅇ': keys.current.right = false; break;
-                case 'q': case 'ㅂ': keys.current.shiftUp = false; break;
-                case 'e': case 'ㄷ': keys.current.shiftDown = false; break;
+                case 'q': case 'ㅂ':
+                    keys.current.shiftUp = false;
+                    // window._carKeys와 동기화
+                    if (window._carKeys) window._carKeys.shiftUp = false;
+                    break;
+                case 'e': case 'ㄷ':
+                    keys.current.shiftDown = false;
+                    // window._carKeys와 동기화
+                    if (window._carKeys) window._carKeys.shiftDown = false;
+                    break;
                 default: break;
             }
         };
@@ -522,12 +568,22 @@ function useCarPhysics({
     onCheckpointPass,
     setPathDeviation,
     setCollisionEffect,
-    gearSystem
+    gearSystem,
+    setTireWear,
+    setTireTemp
 }) {
     const carAngleRef = useRef(carAngle);
     const speedRef = useRef(speed);
     useEffect(() => { carAngleRef.current = carAngle; }, [carAngle]);
     useEffect(() => { speedRef.current = speed; }, [speed]);
+
+    // 타이어 상태 ref
+    const tireWearRef = useRef(0);
+    const tireTempRef = useRef(90);
+    useEffect(() => { tireWearRef.current = 0; tireTempRef.current = 90; }, [isRacing]);
+
+    // 프레임 타이밍 관리
+    const lastTimeRef = useRef(performance.now());
 
     useEffect(() => {
         if (!isRacing) return;
@@ -537,6 +593,8 @@ function useCarPhysics({
             setCarPosition(prev => {
                 let newAngle = carAngleRef.current;
                 let newSpeed = speedRef.current;
+                let throttle = 0, brake = 0, steering = 0;
+                let newX, newY; // 위치 변수 명확히 선언
 
                 // AI 자동 주행 로직
                 if (isAIDriving && idealLine.length > 10) {
@@ -554,13 +612,16 @@ function useCarPhysics({
                         if (angleDiff < -180) angleDiff += 360;
 
                         newAngle += angleDiff * 0.1; // 부드러운 조향
+                        steering = angleDiff * 0.05;
 
                         // AI 속도 제어
                         const deviation = calculatePathDeviation(prev, idealLine);
                         if (deviation < 2) {
                             newSpeed = Math.min(newSpeed + 0.5, 12); // 편차가 작으면 가속
+                            throttle = 1; brake = 0;
                         } else {
                             newSpeed = Math.max(newSpeed - 0.3, 5); // 편차가 크면 감속
+                            throttle = 0.3; brake = 0.7;
                         }
 
                         // AI 후진 처리 (필요시)
@@ -583,39 +644,64 @@ function useCarPhysics({
                         gearSystem.manualShift('down');
                     }
 
+                    // === throttle, brake, steering 값 명확히 세팅 (기존 주석/코드 보존) ===
+                    // 기존 throttle, brake, steering 선언은 유지
+                    if (window._carKeys?.up) throttle = 1;
+                    if (window._carKeys?.down) brake = 1;
+                    if (window._carKeys?.left && !window._carKeys?.right) steering = -1;
+                    if (window._carKeys?.right && !window._carKeys?.left) steering = 1;
+                    if (window._carKeys?.left && window._carKeys?.right) steering = 0;
+
                     // 현실적인 가속/감속/후진 (기어별 속도 제한 적용)
-                    let throttle = 0;
+                    let throttleForRPM = 0;
+                    if (window._carKeys?.shiftUp) gearSystem.manualShift('up');
+                    if (window._carKeys?.shiftDown) gearSystem.manualShift('down');
                     if (window._carKeys?.up) {
-                        throttle = 1;
+                        throttleForRPM = 1;
                         // 전진 가속 (기어별 속도 제한)
                         if (newSpeed >= 0) {
-                            // 기어 유효성 검사 및 동기화 - 실제 기어 상태 사용 (N, R, 1-6단)
+                            // === 기어 유효성 검사 및 동기화 (배열 기반 동적 범위로 교체) ===
                             const actualGear = gearSystem.getCurrentGear ? gearSystem.getCurrentGear() : gearSystem.currentGear;
-                            const currentGear = Math.max(0, Math.min(7, actualGear || 0));
-                            const maxSpeedKMH = GEAR_SYSTEM.MAX_SPEED_PER_GEAR[currentGear] || 85;
+                            const maxGear = GEAR_SYSTEM.MAX_SPEED_PER_GEAR.length - 1;
+                            const currentGear = Math.min(Math.max(actualGear || 0, 0), maxGear);
+
+                            // === getGearSpeedLimit undefined 방지 ===
+                            const maxSpeedKMH = GEAR_SYSTEM.MAX_SPEED_PER_GEAR[currentGear];
+                            if (typeof maxSpeedKMH !== 'number' || isNaN(maxSpeedKMH)) {
+                                console.warn('getGearSpeedLimit: invalid for gear', currentGear, 'fallback 85');
+                                maxSpeedKMH = 85;
+                            }
                             const maxSpeedGame = maxSpeedKMH / 10; // KM/h를 게임 속도로 변환
 
-                            // 현실적인 기어비 시스템 (N, R, 1-6단)
+                            // === 현실적인 기어비 시스템 (배열 기반 동적 범위로 교체) ===
                             const gearAccelerationRates = {
                                 0: 0.00, // N(중립): 엔진 동력 전달 안됨
-                                1: 0.10, // R(후진): 후진 가속
-                                2: 0.15, // 1단: 가장 빠른 가속
-                                3: 0.12, // 2단: 빠른 가속
-                                4: 0.08, // 3단: 중간 가속
-                                5: 0.05, // 4단: 느린 가속
-                                6: 0.03, // 5단: 매우 느린 가속
-                                7: 0.02  // 6단: 가장 느린 가속
+                                1: 0.20, // R(후진): 후진 가속
+                                2: 0.30, // 1단: 가장 빠른 가속
+                                3: 0.20, // 2단: 빠른 가속
+                                4: 0.12, // 3단: 중간 가속
+                                5: 0.08, // 4단: 느린 가속
+                                6: 0.05, // 5단: 매우 느린 가속
+                                7: 0.03  // 6단: 가장 느린 가속
                             };
 
-                            const acceleration = gearAccelerationRates[currentGear] || 0.00;
+                            // === 기어 가속도 범위 방어 ===
+                            const safeGearForAccel = Math.min(Math.max(currentGear, 0), 7);
+                            const acceleration = gearAccelerationRates[safeGearForAccel] || 0.00;
 
                             // 점진적 가속 (관성 고려)
                             const targetSpeed = maxSpeedGame;
                             const speedDiff = targetSpeed - newSpeed;
                             const actualAcceleration = Math.min(acceleration, Math.abs(speedDiff) * 0.1);
 
+                            // 전진 가속
                             if (speedDiff > 0) {
                                 newSpeed = Math.min(newSpeed + actualAcceleration, targetSpeed);
+                            } else {
+                                // 후진 중일 때 전진으로 전환 (기어를 N으로 변경)
+                                // console.log('Shifting from reverse to neutral: R -> N');
+                                if (gearSystem.currentGear === 1) gearSystem.setCurrentGear(0);
+                                newSpeed = Math.min(newSpeed + 2.0, 0);
                             }
 
                             // 디버깅: 기어별 속도 제한 확인 (가속 중일 때만) - 실제 기어 상태 표시
@@ -630,17 +716,14 @@ function useCarPhysics({
 
                             // 디버깅: 현실적인 변속 시스템 상태
                             // console.log(`Gear: ${currentGear}, Speed: ${newSpeed.toFixed(1)} (${(newSpeed * 10).toFixed(0)}km/h), Max: ${maxSpeedGame.toFixed(1)}, RPM: ${Math.round(gearSystem.engineRPM || 1000)}`);
+                            if (speedDiff > 0) newSpeed = Math.min(newSpeed + actualAcceleration, targetSpeed);
                         } else {
-                            // 후진 중일 때 전진으로 전환 (기어를 N으로 변경)
-                            if (gearSystem.currentGear === 1) {
-                                // console.log(`Shifting from reverse to neutral: R -> N`);
-                                gearSystem.setCurrentGear(0); // N으로 변경
-                            }
+                            if (gearSystem.currentGear === 1) gearSystem.setCurrentGear(0);
                             newSpeed = Math.min(newSpeed + 2.0, 0);
                         }
                     }
                     if (window._carKeys?.down) {
-                        throttle = -1;
+                        throttleForRPM = -1;
                         if (newSpeed > 0) {
                             // 전진 중일 때 점진적 감속
                             const deceleration = 0.1; // 점진적 감속
@@ -667,29 +750,85 @@ function useCarPhysics({
                         }
                     }
 
-                    // RPM 업데이트 (유효성 검사 포함)
+                    // === RPM 업데이트 (유효성 검사 포함) ===
                     if (typeof newSpeed === 'number' && !isNaN(newSpeed)) {
-                        gearSystem.updateRPM(newSpeed, throttle);
+                        gearSystem.updateRPM(newSpeed, throttleForRPM);
 
                         // 자동 변속 (자동 모드일 때)
                         if (gearSystem.isAutoShift && !gearSystem.manualShiftMode) {
-                            gearSystem.autoShift(gearSystem.engineRPM, newSpeed);
+                            gearSystem.autoShift(gearSystem.engineRPM, newSpeed, throttleForRPM);
                         }
 
-                        // 디버깅: 변속 시스템 상태 (가속 중일 때만) - 로그 빈도 줄임
-                        if (throttle > 0 && newSpeed > 5.0) { // 로그 빈도 더 줄임
-                            // console.log(`Gear: ${gearSystem.currentGear}, Speed: ${newSpeed.toFixed(1)}, RPM: ${Math.round(gearSystem.engineRPM)}, AutoShift: ${gearSystem.isAutoShift}`);
+                        // === 디버깅: 속도 0 현상 추적 ===
+                        if (newSpeed > 0.1 && throttleForRPM > 0) {
+                            console.log(`[Speed Debug] Speed: ${newSpeed.toFixed(2)}, Gear: ${gearSystem.currentGear}, RPM: ${Math.round(gearSystem.engineRPM)}, Throttle: ${throttleForRPM}`);
                         }
                     } else {
                         console.warn('Invalid speed value for RPM update:', newSpeed);
                     }
                 }
 
-                const angleRad = (newAngle * Math.PI) / 180;
-                const newVelX = Math.sin(angleRad) * newSpeed * 0.8;
-                const newVelY = -Math.cos(angleRad) * newSpeed * 0.8;
-                const newX = prev.x + newVelX;
-                const newY = prev.y + newVelY;
+                // === [고급 물리 효과 보정 코드] ===
+                const now = performance.now();
+                const dt = Math.max(0.008, Math.min(0.05, (now - lastTimeRef.current) / 1000)); // 8~50ms 제한
+                lastTimeRef.current = now;
+
+                // NaN/Infinity 추적 디버깅 로그
+                if (!isFinite(newAngle) || isNaN(newAngle)) {
+                    console.error('[NaN/Infinity] newAngle:', newAngle, 'prev.heading:', prev.heading, 'throttle:', throttle, 'brake:', brake, 'steering:', steering);
+                }
+                if (!isFinite(newSpeed) || isNaN(newSpeed)) {
+                    console.error('[NaN/Infinity] newSpeed:', newSpeed, 'prev.speed:', speedRef.current, 'throttle:', throttle, 'brake:', brake, 'steering:', steering, 'dt:', dt);
+                }
+                let vx = Math.sin(newAngle * Math.PI / 180) * newSpeed;
+                let vy = -Math.cos(newAngle * Math.PI / 180) * newSpeed;
+                if (!isFinite(vx) || isNaN(vx)) {
+                    console.error('[NaN/Infinity] vx:', vx, 'newAngle:', newAngle, 'newSpeed:', newSpeed);
+                }
+                if (!isFinite(vy) || isNaN(vy)) {
+                    console.error('[NaN/Infinity] vy:', vy, 'newAngle:', newAngle, 'newSpeed:', newSpeed);
+                }
+                let carState = {
+                    x: typeof prev.x === 'number' ? prev.x : 0,
+                    y: typeof prev.y === 'number' ? prev.y : 0,
+                    heading: newAngle,
+                    tireWear: tireWearRef.current,
+                    tireTemp: tireTempRef.current
+                };
+                let velocity = { x: vx, y: vy };
+                // updateVehiclePhysics 호출 전후 입력값/출력값 디버깅
+                console.log('[Physics Input] carState:', carState, 'input:', { throttle, brake, steering }, 'dt:', dt, 'velocity:', velocity);
+                updateVehiclePhysics(carState, { throttle, brake, steering }, dt, velocity);
+                console.log('[Physics Output] carState:', carState, 'velocity:', velocity);
+
+                // updateVehiclePhysics 결과를 최종 상태로 반영 (항상 수치적으로 안전하게)
+                if (typeof carState.x === 'number' && isFinite(carState.x)) newX = carState.x;
+                else newX = prev.x;
+                if (typeof carState.y === 'number' && isFinite(carState.y)) newY = carState.y;
+                else newY = prev.y;
+                if (typeof carState.heading === 'number' && isFinite(carState.heading)) newAngle = carState.heading;
+                else newAngle = prev.heading || 0;
+                if (
+                    typeof velocity.x === 'number' && typeof velocity.y === 'number' &&
+                    isFinite(velocity.x) && isFinite(velocity.y)
+                ) {
+                    newSpeed = Math.sqrt(velocity.x ** 2 + velocity.y ** 2);
+                } else {
+                    // newSpeed = 0; // ← 이 부분을
+                    newSpeed = prev.speed; // 이전 정상값 유지
+                }
+                if (setTireWear) setTireWear(carState.tireWear);
+                if (setTireTemp) setTireTemp(carState.tireTemp);
+                tireWearRef.current = carState.tireWear;
+                tireTempRef.current = carState.tireTemp;
+                // === [고급 물리 효과 보정 코드 끝] ===
+                // 아래 코드 공기저항, 다운포스, 타이어 마모/온도 등 고급 효과를 반영불가능
+                // 아래 기존 위치/속도/각도 재정의 부분은 updateVehiclePhysics 결과를 덮어쓰지 않도록 주석 처리
+                // const angleRad = (newAngle * Math.PI) / 180;
+                // const newVelX = Math.sin(angleRad) * newSpeed * 0.8;
+                // const newVelY = -Math.cos(angleRad) * newSpeed * 0.8;
+                // const newX = prev.x + newVelX;
+                // const newY = prev.y + newVelY;
 
                 // 충돌 감지 및 처리
                 const collision = calculateWallCollision(prev, { x: newX, y: newY }, newAngle, newSpeed, trackLayout);
@@ -727,6 +866,9 @@ function useCarPhysics({
 }
 
 const F1RacingGame = () => {
+    // 1. 커스텀 훅/상태 선언을 최상단에!
+    const gearSystem = useGearSystem();
+
     const [trackLayout] = useState(createTrackLayout());
     const trackLayoutRef = useRef(trackLayout);
 
@@ -769,6 +911,8 @@ const F1RacingGame = () => {
     const [lapCount, setLapCount] = useState(0);
     const [cameraOffset, setCameraOffset] = useState({ x: 0, y: 0 });
     const [collisionEffect, setCollisionEffect] = useState({ type: 'none', active: false });
+    const [tireWear, setTireWear] = useState(0);
+    const [tireTemp, setTireTemp] = useState(90);
     // keys를 useRef로만 관리하여 성능 최적화
     const keysRef = useRef({ up: false, down: false, left: false, right: false });
 
@@ -806,10 +950,10 @@ const F1RacingGame = () => {
     // addPoint ref 업데이트
     useEffect(() => { addPointRef.current = addPoint; }, [addPoint]);
 
+    // START RACE: 레이스 시작 시 상태 초기화 (기어 변경은 useEffect에서 처리)
     const startRace = useCallback(() => {
-        // console.log('Starting race...'); // 디버깅 로그
-        setIsRacing(true);
-        setCarPosition(getValidStartPosition()); // 유효한 시작 위치로 이동
+        setIsRacing(true); // isRacing이 true가 되면 useEffect에서 1단 자동 변속
+        setCarPosition(getValidStartPosition());
         setCarAngle(180);
         setSpeed(0);
         setCurrentLapTime(0);
@@ -818,7 +962,15 @@ const F1RacingGame = () => {
         setLapCount(0);
         setPathDeviation(0);
         setCollisionEffect({ type: 'none', active: false });
-    }, []);
+        // gearSystem.setCurrentGear(2); // (이제는 useEffect에서 처리)
+    }, [getValidStartPosition]);
+
+    // === [자동 변속 개선: 레이스 시작 시 1단 자동 변속] ===
+    useEffect(() => {
+        if (isRacing && gearSystem && gearSystem.setCurrentGear) {
+            gearSystem.setCurrentGear(2); // 1단으로 자동 변속
+        }
+    }, [isRacing, gearSystem]);
 
     const stopRace = useCallback(() => {
         setIsRacing(false);
@@ -839,10 +991,9 @@ const F1RacingGame = () => {
     // 키 입력 커스텀 훅
     const keys = useCarControls();
     // window에 키 상태 공유(물리 훅에서 접근)
-    useEffect(() => { window._carKeys = keys.current; });
-
-    // 변속 시스템 커스텀 훅
-    const gearSystem = useGearSystem();
+    useEffect(() => {
+        window._carKeys = keys.current;
+    });
 
     // 디버깅: 변속 시스템 초기화 확인
     useEffect(() => {
@@ -902,7 +1053,9 @@ const F1RacingGame = () => {
         onCheckpointPass,
         setPathDeviation,
         setCollisionEffect,
-        gearSystem
+        gearSystem,
+        setTireWear,
+        setTireTemp
     });
 
     // 키보드 입력 처리는 useEffect 내부에서 직접 처리
@@ -920,19 +1073,35 @@ const F1RacingGame = () => {
             switch (key) {
                 case 'arrowup': case 'w': case 'ㅈ':
                     keysRef.current.up = true;
-                    // console.log('W/Up/ㅈ key pressed, keysRef after:', keysRef.current);
+                    // window._carKeys와 동기화
+                    if (window._carKeys) window._carKeys.up = true;
                     break;
                 case 'arrowdown': case 's': case 'ㄴ':
                     keysRef.current.down = true;
-                    // console.log('S/Down/ㄴ key pressed, keysRef after:', keysRef.current);
+                    // window._carKeys와 동기화
+                    if (window._carKeys) window._carKeys.down = true;
                     break;
                 case 'arrowleft': case 'a': case 'ㅁ':
                     keysRef.current.left = true;
-                    // console.log('A/Left/ㅁ key pressed, keysRef after:', keysRef.current);
+                    // window._carKeys와 동기화
+                    if (window._carKeys) window._carKeys.left = true;
                     break;
                 case 'arrowright': case 'd': case 'ㅇ':
                     keysRef.current.right = true;
-                    // console.log('D/Right/ㅇ key pressed, keysRef after:', keysRef.current);
+                    // window._carKeys와 동기화
+                    if (window._carKeys) window._carKeys.right = true;
+                    break;
+                case 'q': case 'ㅂ':
+                    keysRef.current.shiftUp = true;
+                    // window._carKeys와 동기화
+                    if (window._carKeys) window._carKeys.shiftUp = true;
+                    //console.log('Q/ㅂ key pressed (shift up), keysRef after:', keysRef.current, 'window._carKeys:', window._carKeys);
+                    break;
+                case 'e': case 'ㄷ':
+                    keysRef.current.shiftDown = true;
+                    // window._carKeys와 동기화
+                    if (window._carKeys) window._carKeys.shiftDown = true;
+                    //console.log('E/ㄷ key pressed (shift down), keysRef after:', keysRef.current, 'window._carKeys:', window._carKeys);
                     break;
                 case ' ':
                     event.preventDefault();
@@ -955,15 +1124,33 @@ const F1RacingGame = () => {
             switch (key) {
                 case 'arrowup': case 'w': case 'ㅈ':
                     keysRef.current.up = false;
+                    // window._carKeys와 동기화
+                    if (window._carKeys) window._carKeys.up = false;
                     break;
                 case 'arrowdown': case 's': case 'ㄴ':
                     keysRef.current.down = false;
+                    // window._carKeys와 동기화
+                    if (window._carKeys) window._carKeys.down = false;
                     break;
                 case 'arrowleft': case 'a': case 'ㅁ':
                     keysRef.current.left = false;
+                    // window._carKeys와 동기화
+                    if (window._carKeys) window._carKeys.left = false;
                     break;
                 case 'arrowright': case 'd': case 'ㅇ':
                     keysRef.current.right = false;
+                    // window._carKeys와 동기화
+                    if (window._carKeys) window._carKeys.right = false;
+                    break;
+                case 'q': case 'ㅂ':
+                    keysRef.current.shiftUp = false;
+                    // window._carKeys와 동기화
+                    if (window._carKeys) window._carKeys.shiftUp = false;
+                    break;
+                case 'e': case 'ㄷ':
+                    keysRef.current.shiftDown = false;
+                    // window._carKeys와 동기화
+                    if (window._carKeys) window._carKeys.shiftDown = false;
                     break;
                 default: break;
             }
@@ -1008,7 +1195,7 @@ const F1RacingGame = () => {
     return (
         <div className="flex flex-col items-center p-4 bg-gray-900 min-h-screen text-white">
             <h1 className="text-3xl font-bold mb-4 text-red-500">🏎️ F1 Circuit Racing</h1>
-            {/* 게임 정보 */}
+            {/* 상단: 차량 주행 관련 정보 */}
             <div className="flex gap-4 mb-4 text-sm">
                 <div className="bg-gray-800 p-2 rounded">
                     <div className="text-gray-300">Current Lap</div>
@@ -1016,15 +1203,11 @@ const F1RacingGame = () => {
                 </div>
                 <div className="bg-gray-800 p-2 rounded">
                     <div className="text-gray-300">Best Lap</div>
-                    <div className="text-lg font-mono text-yellow-400">
-                        {bestLapTime ? formatTime(bestLapTime) : '--:--'}
-                    </div>
+                    <div className="text-lg font-mono text-yellow-400">{bestLapTime ? formatTime(bestLapTime) : '--:--'}</div>
                 </div>
                 <div className="bg-gray-800 p-2 rounded">
                     <div className="text-gray-300">Ideal Line Time</div>
-                    <div className="text-lg font-mono text-cyan-400">
-                        {idealLineTime ? formatTime(idealLineTime) : '--:--'}
-                    </div>
+                    <div className="text-lg font-mono text-cyan-400">{idealLineTime ? formatTime(idealLineTime) : '--:--'}</div>
                 </div>
                 <div className="bg-gray-800 p-2 rounded">
                     <div className="text-gray-300">Laps</div>
@@ -1032,37 +1215,45 @@ const F1RacingGame = () => {
                 </div>
                 <div className="bg-gray-800 p-2 rounded">
                     <div className="text-gray-300">Speed</div>
-                    <div className={`text-lg font-mono ${speed < 0 ? 'text-red-400' : speed > 0 ? 'text-green-400' : 'text-white'}`}>
-                        {speed >= 0 ? `${speed.toFixed(1)} (${(speed * 10).toFixed(0)}km/h)` : `R ${Math.abs(speed).toFixed(1)}`}
-                    </div>
+                    <div className={`text-lg font-mono ${speed < 0 ? 'text-red-400' : speed > 0 ? 'text-green-400' : 'text-white'}`}>{speed >= 0 ? `${speed.toFixed(1)} (${(speed * 10).toFixed(0)}km/h)` : `R ${Math.abs(speed).toFixed(1)}`}</div>
+                </div>
+                <div className="bg-gray-800 p-2 rounded">
+                    <div className="text-gray-300">RPM</div>
+                    <div className={`text-lg font-mono ${gearSystem.engineRPM > 5000 ? 'text-red-500' : gearSystem.engineRPM > 4000 ? 'text-yellow-400' : 'text-green-400'}`}>{Math.round(gearSystem.engineRPM)}</div>
                 </div>
                 <div className="bg-gray-800 p-2 rounded">
                     <div className="text-gray-300">Gear</div>
                     <div className="text-lg font-mono text-blue-400">{gearSystem.gearDisplay}</div>
                 </div>
                 <div className="bg-gray-800 p-2 rounded">
-                    <div className="text-gray-300">RPM</div>
-                    <div className={`text-lg font-mono ${gearSystem.engineRPM > 5000 ? 'text-red-500' : gearSystem.engineRPM > 4000 ? 'text-yellow-400' : 'text-green-400'}`}>
-                        {Math.round(gearSystem.engineRPM)}
-                    </div>
-                </div>
-                <div className="bg-gray-800 p-2 rounded">
                     <div className="text-gray-300">Shift Mode</div>
-                    <div className={`text-lg font-mono ${gearSystem.isAutoShift ? 'text-purple-400' : 'text-orange-400'}`}>
-                        {gearSystem.isAutoShift ? 'AUTO' : 'MANUAL'}
-                    </div>
+                    <div className={`text-lg font-mono ${gearSystem.isAutoShift ? 'text-purple-400' : 'text-orange-400'}`}>{gearSystem.isAutoShift ? 'AUTO' : 'MANUAL'}</div>
                 </div>
-                <div className="bg-gray-800 p-2 rounded">
+            </div>
+            {/* 우측: 경로/AI/타이어 관련 정보 */}
+            <div
+                className="fixed right-10 top-1/2 flex flex-col gap-2 z-50"
+                style={{ transform: 'translateY(-50%)', maxWidth: 180 }}
+            >
+                <div className="bg-gray-800 p-2 rounded min-w-[140px]">
                     <div className="text-gray-300">Path Deviation</div>
                     <div className="text-lg font-mono text-orange-400">{pathDeviation.toFixed(1)}</div>
                 </div>
-                <div className="bg-gray-800 p-2 rounded">
+                <div className="bg-gray-800 p-2 rounded min-w-[140px]">
                     <div className="text-gray-300">Ideal Line</div>
                     <div className="text-lg font-mono">{isDrawing ? 'ON' : 'OFF'}</div>
                 </div>
-                <div className="bg-gray-800 p-2 rounded">
+                <div className="bg-gray-800 p-2 rounded min-w-[140px]">
                     <div className="text-gray-300">AI Driving</div>
                     <div className="text-lg font-mono text-green-400">{isAIDriving ? 'ON' : 'OFF'}</div>
+                </div>
+                <div className="bg-gray-800 p-2 rounded min-w-[140px]">
+                    <div className="text-gray-300">Tire Wear</div>
+                    <div className="text-lg font-mono text-pink-400">{(tireWear * 100).toFixed(1)}%</div>
+                </div>
+                <div className="bg-gray-800 p-2 rounded min-w-[140px]">
+                    <div className="text-gray-300">Tire Temp</div>
+                    <div className="text-lg font-mono text-yellow-300">{tireTemp.toFixed(1)}°C</div>
                 </div>
             </div>
             {/* 게임 뷰포트 */}
